@@ -8,13 +8,15 @@
         <version>3.5.4</version>
         <relativePath/> <!-- lookup parent from repository -->
     </parent>
-    <groupId>org.logicsoft.molina</groupId>
+    <groupId>com.logicsoftsac.molina</groupId>
     <artifactId>response-handler</artifactId>
-    <version>1.0.0</version>
+    <version>1.2.0</version>
     <name>response-handler</name>
     <packaging>jar</packaging>
-    <description>An response </description>
-    <url>http://www.example.com/example-application</url>
+    <description>A lightweight response handler library that wraps controller results (Mono, Flux, or
+        objects) into a unified JSON envelope with timestamp, status, result, data, and error message.
+    </description>
+    <url>https://www.example.com/example-application</url>
     <licenses>
         <license>
             <name>MIT License</name>
@@ -25,13 +27,13 @@
         <developer>
             <name>Walter Moises Molina Paucar</name>
             <email>w7moises@gmail.com</email>
+            <organizationUrl>https://github.com/w7moises</organizationUrl>
         </developer>
     </developers>
     <scm>
-        <connection/>
-        <developerConnection/>
-        <tag/>
-        <url/>
+        <connection>scm:git:git://github.com/w7moises/Handler-Library.git</connection>
+        <developerConnection>scm:git:ssh://github.com:w7moises/Handler-Library.git</developerConnection>
+        <url>https://github.com/w7moises/Handler-Library/tree/main</url>
     </scm>
     <properties>
         <java.version>17</java.version>
@@ -48,6 +50,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
             <optional>true</optional>
         </dependency>
         <dependency>

@@ -1,4 +1,4 @@
-package org.logicsoft.molina.api;
+package com.logicsoft.molina.api;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 

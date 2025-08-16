@@ -1,7 +1,9 @@
-package org.logicsoft.molina.core;
+package com.logicsoft.molina.core;
 
-import org.logicsoft.molina.annotations.ResponseHandler;
-import org.logicsoft.molina.api.ApiResponse;
+import com.logicsoft.molina.annotations.ResponseHandler;
+import com.logicsoft.molina.api.ApiResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
 import org.springframework.core.ResolvableType;
@@ -19,6 +21,8 @@ import java.lang.reflect.Method;
 import java.time.Instant;
 
 public class ApiResponseResultHandler implements HandlerResultHandler, Ordered {
+
+    private static final Logger log = LoggerFactory.getLogger(ApiResponseResultHandler.class);
 
     private final ResponseBodyResultHandler delegate;
 
@@ -41,7 +45,18 @@ public class ApiResponseResultHandler implements HandlerResultHandler, Ordered {
             Class<?> containing = methodParameter.getContainingClass();
             responseHandler = containing.getAnnotation(ResponseHandler.class);
         }
-        return responseHandler != null;
+        if (responseHandler == null) return false;
+        ResolvableType rt = result.getReturnType();
+        Class<?> raw = rt.toClass();
+        if (isPublisher(raw)) {
+            Class<?> inner = rt.getGeneric(0).toClass();
+            if (isPublisher(inner)) {
+                String msg = "⚠️ Invalid reactive return type detected: " + rt +
+                        ". Avoid using Mono<Flux<T>> or Flux<Mono<T>>. ";
+                log.error(msg);
+            }
+        }
+        return true;
     }
 
     @Override
@@ -49,64 +64,61 @@ public class ApiResponseResultHandler implements HandlerResultHandler, Ordered {
     public Mono<Void> handleResult(@NonNull ServerWebExchange exchange, HandlerResult result) {
         MethodParameter methodParameter = result.getReturnTypeSource();
         ResponseHandler responseHandler = methodParameter.getMethodAnnotation(ResponseHandler.class);
-        if (responseHandler == null) responseHandler = methodParameter.getContainingClass().getAnnotation(ResponseHandler.class);
-
+        if (responseHandler == null) {
+            responseHandler = methodParameter.getContainingClass().getAnnotation(ResponseHandler.class);
+        }
         final int status = (responseHandler != null ? responseHandler.status() : 200);
         final boolean ok = (responseHandler == null || responseHandler.result());
-
         Object originalBody = result.getReturnValue();
-
         if (originalBody == null) {
             ApiResponse<Object> env = okEnvelope(status, ok, null);
+            exchange.getResponse().setStatusCode(org.springframework.http.HttpStatus.valueOf(env.getStatus()));
             return write(exchange, result, env);
         }
-
         if (originalBody instanceof Mono<?> mono) {
             Mono<ApiResponse<Object>> mapped = mono
                     .map(data -> okEnvelope(status, ok, data))
                     .onErrorResume(ex -> Mono.just(errorEnvelope(ex)));
-            return write(exchange, result, mapped);
-        }
 
+            return mapped.flatMap(env -> {
+                exchange.getResponse().setStatusCode(org.springframework.http.HttpStatus.valueOf(env.getStatus()));
+                return write(exchange, result, env);
+            });
+        }
         if (originalBody instanceof Flux<?> flux) {
             Mono<ApiResponse<Object>> envMono = flux
                     .collectList()
                     .map(list -> okEnvelope(status, ok, list))
                     .onErrorResume(ex -> Mono.just(errorEnvelope(ex)));
-            return write(exchange, result, envMono);
-        }
 
+            return envMono.flatMap(env -> {
+                exchange.getResponse().setStatusCode(org.springframework.http.HttpStatus.valueOf(env.getStatus()));
+                return write(exchange, result, env);
+            });
+        }
         ApiResponse<Object> env = okEnvelope(status, ok, originalBody);
+        exchange.getResponse().setStatusCode(org.springframework.http.HttpStatus.valueOf(env.getStatus()));
         return write(exchange, result, env);
     }
 
-    /**
-     * Crea un nuevo HandlerResult con un MethodParameter cuyo tipo de retorno es ApiResponse<Object>
-     */
     private Mono<Void> write(ServerWebExchange exchange, HandlerResult original, Object newBody) {
         HandlerResult newResult = new HandlerResult(
-                original.getHandler(),              // ¡handler no nulo!
+                original.getHandler(),
                 newBody,
-                methodParameterForApiResponse()     // tipo de retorno = ApiResponse<Object>
+                methodParameterForApiResponse()
         );
         return this.delegate.handleResult(exchange, newResult);
     }
 
-    /**
-     * MethodParameter apuntando al return type de Dummy.m(): ApiResponse<Object>
-     */
     private static MethodParameter methodParameterForApiResponse() {
         try {
             Method m = Dummy.class.getDeclaredMethod("m");
-            return new MethodParameter(m, -1); // -1 = tipo de retorno
+            return new MethodParameter(m, -1);
         } catch (NoSuchMethodException e) {
             throw new IllegalStateException(e);
         }
     }
 
-    /**
-     * Método “dummy” cuyo return define el tipo expuesto al writer
-     */
     static final class Dummy {
         public static ApiResponse<Object> m() {
             return null;
@@ -130,5 +142,9 @@ public class ApiResponseResultHandler implements HandlerResultHandler, Ordered {
         r.setMessage(ex.getMessage());
         r.setData(null);
         return r;
+    }
+
+    private static boolean isPublisher(Class<?> c) {
+        return c != null && (Mono.class.isAssignableFrom(c) || Flux.class.isAssignableFrom(c));
     }
 }

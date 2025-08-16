@@ -1,6 +1,6 @@
 # Response Handler for Spring WebFlux
 
-A lightweight handler that enforces a **consistent JSON envelope** for WebFlux controllers and guards against invalid reactive return types.
+A lightweight handler that enforces a **consistent JSON envelope** for spring boot and webflux projects and guards against invalid reactive return types.
 
 ## Response Format
 

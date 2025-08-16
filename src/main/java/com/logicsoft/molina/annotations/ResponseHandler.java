@@ -1,4 +1,4 @@
-package org.logicsoft.molina.annotations;
+package com.logicsoft.molina.annotations;
 
 import java.lang.annotation.*;
 
