@@ -4,96 +4,148 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.logicsoft.molina.annotations.ResponseHandler;
 import com.logicsoft.molina.api.ApiResponse;
+import jakarta.validation.Validator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
-import org.springframework.http.*;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.StringHttpMessageConverter;
 import org.springframework.http.server.ServerHttpRequest;
 import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.validation.beanvalidation.MethodValidationPostProcessor;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyAdvice;
+import reactor.util.annotation.NonNull;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Order(Ordered.HIGHEST_PRECEDENCE)
 @RestControllerAdvice
 public class ApiResponseMvcAdvice implements ResponseBodyAdvice<Object> {
 
+    private static final Logger log = LoggerFactory.getLogger(ApiResponseMvcAdvice.class);
+
     private final ObjectMapper mapper;
 
-    // ObjectMapper opcional: usa el del contexto si existe; si no, crea uno.
-    public ApiResponseMvcAdvice(ObjectProvider<ObjectMapper> mapperProvider) {
-        ObjectMapper m = mapperProvider.getIfAvailable(ObjectMapper::new);
-        // (opcional) coherencia en timestamps si tu ApiResponse usa Instant
-        m.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.mapper = m;
+    // Diagnóstico no intrusivo de validación
+    private final boolean validationActive;
+    private final boolean warnWhenInactive;
+    private final AtomicBoolean warnedOnce = new AtomicBoolean(false);
+
+    public ApiResponseMvcAdvice(ObjectProvider<ObjectMapper> mapperProvider,
+                                ApplicationContext ctx,
+                                @Value("${molina.response-handler.validation.warn-when-inactive:true}")
+                                boolean warnWhenInactive) {
+        this.mapper = Optional.of(mapperProvider.getIfAvailable(ObjectMapper::new))
+                .map(m -> m.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS))
+                .orElseGet(() -> {
+                    ObjectMapper objectMapper = new ObjectMapper();
+                    objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+                    return objectMapper;
+                });
+
+        boolean hasValidator = ctx.getBeanProvider(Validator.class).getIfAvailable() != null;
+        boolean hasMethodValidation = ctx.getBeanProvider(MethodValidationPostProcessor.class).getIfAvailable() != null;
+        this.validationActive = hasValidator && hasMethodValidation;
+        this.warnWhenInactive = warnWhenInactive;
     }
 
     @Override
-    public boolean supports(MethodParameter returnType,
-                            Class<? extends HttpMessageConverter<?>> converterType) {
-        // Aplica solo si hay @ResponseHandler
-        ResponseHandler ann = Optional.ofNullable(returnType.getMethodAnnotation(ResponseHandler.class))
-                .orElse(returnType.getDeclaringClass().getAnnotation(ResponseHandler.class));
-        return ann != null; // ✅ ahora NO excluimos StringHttpMessageConverter
+    public boolean supports(@NonNull MethodParameter returnType,
+                            @NonNull Class<? extends HttpMessageConverter<?>> converterType) {
+        return findResponseHandler(returnType) != null;
     }
 
     @Override
     public Object beforeBodyWrite(Object body,
-                                  MethodParameter returnType,
-                                  MediaType selectedContentType,
-                                  Class<? extends HttpMessageConverter<?>> selectedConverterType,
-                                  ServerHttpRequest request,
-                                  ServerHttpResponse response) {
+                                  @NonNull MethodParameter returnType,
+                                  @NonNull MediaType selectedContentType,
+                                  @NonNull Class<? extends HttpMessageConverter<?>> selectedConverterType,
+                                  @NonNull ServerHttpRequest request,
+                                  @NonNull ServerHttpResponse response) {
 
-        // Si ya es ApiResponse, solo fijamos status y content-type
-        if (body instanceof ApiResponse<?> alreadyWrapped) {
-            int statusFromBody = alreadyWrapped.getStatus() > 0 ? alreadyWrapped.getStatus() : 200;
-            response.setStatusCode(HttpStatusCode.valueOf(statusFromBody));
-            response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-            // Si el converter es String, devolvemos JSON como String
-            if (StringHttpMessageConverter.class.isAssignableFrom(selectedConverterType)) {
-                try {
-                    return mapper.writeValueAsString(alreadyWrapped);
-                } catch (Exception e) {
-                    throw new RuntimeException("Error serializando ApiResponse", e);
-                }
-            }
+        // Advertir solo una vez si la validación NO está activa
+        if (!validationActive && warnWhenInactive && warnedOnce.compareAndSet(false, true)) {
+            log.warn("[Molina] Bean Validation NO está activa en MVC. Las constraints en @RequestParam/@RequestBody "
+                    + "no se aplicarán. Agregue 'spring-boot-starter-validation' o registre Validator + "
+                    + "MethodValidationPostProcessor si desea validación.");
+        }
+
+        if (body instanceof ProblemDetail || body instanceof ResponseEntity<?>) {
             return body;
         }
-
-        // Leer @ResponseHandler (método > clase)
-        ResponseHandler ann = Optional.ofNullable(returnType.getMethodAnnotation(ResponseHandler.class))
-                .orElse(returnType.getDeclaringClass().getAnnotation(ResponseHandler.class));
-
-        int status = ann != null ? ann.status() : 200;
-        boolean ok = ann == null || ann.result();
-
-        ApiResponse<Object> env = new ApiResponse<>();
-        env.setTimestamp(Instant.now());
-        env.setStatus(status);
-        env.setResult(ok);
-        env.setData(body);
-
-        // Fijar HTTP status y content-type JSON
-        response.setStatusCode(HttpStatusCode.valueOf(status));
-        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-
-        // 🔑 Caso especial: StringHttpMessageConverter seleccionado
-        if (StringHttpMessageConverter.class.isAssignableFrom(selectedConverterType)) {
-            try {
-                // devolvemos String JSON para que el converter String lo escriba tal cual
-                return mapper.writeValueAsString(env);
-            } catch (Exception e) {
-                throw new RuntimeException("Error serializando ApiResponse", e);
-            }
+        if (body instanceof ApiResponse<?> alreadyWrapped) {
+            int status = normalizeStatus(alreadyWrapped.getStatus());
+            setStatusIfNotExplicit(response, status);
+            setJsonContentTypeIfAbsent(response);
+            return maybeToJson(selectedConverterType, alreadyWrapped);
         }
 
-        // Caso normal (Jackson converter): devolver el objeto y que Jackson lo serialice
-        return env;
+        ResponseHandler ann = findResponseHandler(returnType);
+        int status = (ann != null) ? ann.status() : HttpStatus.OK.value();
+        boolean ok = (ann == null) || ann.result();
+        ApiResponse<Object> envelope = new ApiResponse<>();
+        envelope.setTimestamp(Instant.now());
+        envelope.setStatus(status);
+        envelope.setResult(ok);
+        envelope.setData(body);
+
+        setStatusIfNotExplicit(response, status);
+        setJsonContentTypeIfAbsent(response);
+        return maybeToJson(selectedConverterType, envelope);
+    }
+
+    /* ==================== helpers ==================== */
+
+    private ResponseHandler findResponseHandler(MethodParameter mp) {
+        ResponseHandler ann = mp.getMethodAnnotation(ResponseHandler.class);
+        return (ann != null) ? ann : mp.getDeclaringClass().getAnnotation(ResponseHandler.class);
+    }
+
+    private int normalizeStatus(int status) {
+        return status > 0 ? status : HttpStatus.OK.value();
+    }
+
+    private void setStatusIfNotExplicit(ServerHttpResponse response, int status) {
+        if (response instanceof ServletServerHttpResponse servletResp) {
+            int current = servletResp.getServletResponse().getStatus(); // 200 por defecto
+            if (current == HttpStatus.OK.value()) {
+                response.setStatusCode(HttpStatusCode.valueOf(status));
+            }
+        } else {
+            response.setStatusCode(HttpStatusCode.valueOf(status));
+        }
+    }
+
+    private void setJsonContentTypeIfAbsent(ServerHttpResponse response) {
+        HttpHeaders headers = response.getHeaders();
+        if (!headers.containsKey(HttpHeaders.CONTENT_TYPE)) {
+            headers.setContentType(MediaType.APPLICATION_JSON);
+        }
+    }
+
+    private Object maybeToJson(Class<? extends HttpMessageConverter<?>> converterType, Object value) {
+        if (StringHttpMessageConverter.class.isAssignableFrom(converterType)) {
+            try {
+                return mapper.writeValueAsString(value);
+            } catch (Exception e) {
+                throw new RuntimeException("Error in ApiResponse serialization", e);
+            }
+        }
+        return value;
     }
 }
